@@ -3,14 +3,21 @@
    Generates a LaTeX booktabs-style table from the dataset.
 """
 
-__lazy_modules__ = {"re"}
+__lazy_modules__ = {"re", "tablib.formats._text"}
 
 import re
+
+from ._text import has_line_break, split_lines
 
 
 class LATEXFormat:
     title = 'latex'
     extensions = ('tex',)
+
+    #: A cell holding line breaks is typeset as a stack of lines, so the
+    #: line breaks stay inside the cell instead of ending the table row.
+    LINE_BREAK = ' \\\\ '
+    CELL_WRAPPER = '\\shortstack{{{}}}'
 
     TABLE_TEMPLATE = """\
 %% Note: add \\usepackage{booktabs} to your preamble
@@ -117,12 +124,24 @@ class LATEXFormat:
     def _serialize_row(cls, row):
         """Returns string representation of a single row.
 
+        A cell containing line breaks is wrapped in ``\\shortstack{...}``
+        with the line breaks written as ``\\\\``, so each cell stays on one
+        physical line of the output and the table row is not split.
+
         :param row: single dataset row
         """
 
-        new_row = [cls._escape_tex_reserved_symbols(str(item)) if item else ''
-                   for item in row]
+        new_row = [cls._serialize_cell(item) for item in row]
         return 6 * ' ' + ' & '.join(new_row) + ' \\\\'
+
+    @classmethod
+    def _serialize_cell(cls, item):
+        """Serialize one cell, keeping a cell with line breaks in one piece."""
+        text = str(item) if item else ''
+        if not has_line_break(text):
+            return cls._escape_tex_reserved_symbols(text)
+        lines = [cls._escape_tex_reserved_symbols(line) for line in split_lines(text)]
+        return cls.CELL_WRAPPER.format(cls.LINE_BREAK.join(lines))
 
     @classmethod
     def _escape_tex_reserved_symbols(cls, string):

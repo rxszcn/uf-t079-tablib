@@ -7,6 +7,91 @@ Formats
 Tablib supports a wide variety of different tabular formats, both for input and
 output. Moreover, you can :ref:`register your own formats <newformats>`.
 
+.. _line-breaks:
+
+Cell text and line breaks
+=========================
+
+A cell can hold any text, including line breaks. How a line break is carried
+depends on what the target format can express, so the text formats are grouped
+into three fidelity tiers. The tier decides what an export looks like and
+whether an export can be imported back unchanged.
+
+Exact fidelity
+--------------
+
+The format quotes or escapes cell values, so a line break is written verbatim
+and an export followed by an import returns the original dataset. This applies
+to ``csv`` and ``tsv`` (RFC 4180 quoting), ``json`` (``\n`` escapes), ``yaml``
+(double-quoted scalars), ``html`` (text nodes) and ``sql`` (string literals,
+export only). CSV, for example, quotes such a cell::
+
+    id,text
+    1,"a
+    b"
+
+YAML writes any string containing a line break as a double-quoted scalar, with
+the line break spelled as the ``\n`` escape::
+
+    - id: '1'
+      text: "a\nb"
+
+That is deliberate. PyYAML's default single-quoted style marks the line break
+by indentation, so re-indenting the emitted document (for example when
+embedding it in a larger YAML file) used to change the value. The ``\n``
+escape is unaffected by re-indentation. Strings without line breaks keep the
+style they always had.
+
+Equivalent fidelity
+-------------------
+
+``jira`` and ``latex`` are line-oriented: one physical output line is one table
+row, so a raw line break inside a cell would split the row and misalign the
+columns downstream. The line break is therefore written with the notation the
+format defines for a line break. The cell stays on one line and the table
+structure survives.
+
+``jira`` uses ``\\``, the Jira wiki markup notation for an explicit line
+break::
+
+    ||id||text||
+    |1|a\\b|
+
+``latex`` typesets such a cell with ``\shortstack``, with the lines separated
+by ``\\``::
+
+    1 & \shortstack{a \\ b} \\
+
+The conversion is lossy: the notation is markup, not the original line break,
+so an import cannot be offered. Reversing it means splitting on the two
+characters ``\`` ``\`` (jira) or on the same pair inside ``\shortstack``
+(latex) and treating the result as lines again.
+
+Layout
+------
+
+``rst`` and ``cli`` render tables for people to read, not data to exchange. A
+cell with line breaks is laid out over several output lines, so the line break
+is preserved visually but the output no longer maps one output line to one
+table row. ``rst`` switches from a simple table to a grid table for such a
+dataset, because a simple table cannot hold a multi-line cell::
+
+    +----+------+
+    | id | text |
+    +====+======+
+    | 1  | a    |
+    |    | b    |
+    +----+------+
+
+Line endings
+------------
+
+The line endings ``\n``, ``\r\n`` and ``\r`` are all treated as line breaks.
+The exact-fidelity formats keep the characters as they are; the equivalent and
+layout tiers normalise them to ``\n`` before converting. A cell without any
+line break is exported byte for byte as it was before line-break handling
+existed, in every format.
+
 cli
 ===
 
@@ -26,6 +111,10 @@ For example::
 
     dataset.export("cli", tablefmt="github")
     dataset.export("cli", tablefmt="grid")
+
+A cell containing line breaks is rendered by ``tabulate`` as a cell spanning
+several lines in the table formats that support it. The result is a layout for
+reading; see :ref:`line-breaks`.
 
 This format is optional, install Tablib with ``pip install "tablib[cli]"`` to
 make the format available.
@@ -123,6 +212,10 @@ according to the Jira table syntax::
     |col A1|col A2|col A3|
     |col B1|col B2|col B3|
 
+A cell containing line breaks stays on one physical line; each line break is
+written as ``\\``, the Jira notation for an explicit line break. See
+:ref:`line-breaks`.
+
 json
 ====
 
@@ -139,6 +232,9 @@ latex
 
 Import/export using the LaTeX_ format. This format is export-only.
 If a title has been set, it will be exported as the table caption.
+
+A cell containing line breaks is typeset with ``\shortstack`` so that it does
+not end the table row. See :ref:`line-breaks`.
 
 .. _LaTeX: https://www.latex-project.org/
 
@@ -193,6 +289,11 @@ wrapped, otherwise returns a grid table::
     ...     '=====  =====  =====',
     ... ]
     True
+
+A dataset whose headers or cells contain line breaks always uses a grid table,
+because a simple table cannot express a cell spanning several lines. The line
+breaks are rendered as line breaks inside the cell instead of being collapsed
+into spaces. See :ref:`line-breaks`.
 
 .. _reStructuredText: http://docutils.sourceforge.net/rst.html
 

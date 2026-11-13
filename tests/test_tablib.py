@@ -2063,6 +2063,264 @@ class CliTests(BaseTestCase):
         )
 
 
+class LineBreakFidelityTests(BaseTestCase):
+    """Cell text with line breaks across every text export format.
+
+    The formats are grouped by the fidelity they can offer (see
+    ``tablib.formats._text``):
+
+    * exact: the format can quote/escape an arbitrary value, so the line
+      break is written verbatim and export -> import round trips;
+    * equivalent: a line-oriented markup format, where a line break in the
+      cell becomes the notation the format defines for a line break, so the
+      physical table rows stay intact;
+    * layout: a rendered table for reading, where cells may span lines.
+    """
+
+    #: One cell with a line break in the middle, one with a trailing break,
+    #: one with a blank line, one with an indented second line and a plain
+    #: cell, so both the multi-line cases and the unchanged cases are covered.
+    ROWS = [
+        ('a\nb', 'one'),
+        ('c\nd\ne', 'two'),
+        ('f\n\ng', 'three'),
+        ('h\n  i', 'four'),
+        ('plain', 'five'),
+        ('trailing\n', 'six'),
+    ]
+
+    def build_dataset(self):
+        data = tablib.Dataset(headers=['text', 'tag'])
+        for row in self.ROWS:
+            data.append(row)
+        return data
+
+    def test_fidelity_table_matches_implemented_formats(self):
+        from tablib.formats import _text
+
+        self.assertEqual(_text.FORMAT_FIDELITY['csv'], _text.FIDELITY_EXACT)
+        self.assertEqual(_text.FORMAT_FIDELITY['jira'], _text.FIDELITY_EQUIVALENT)
+        self.assertEqual(_text.FORMAT_FIDELITY['latex'], _text.FIDELITY_EQUIVALENT)
+        self.assertEqual(_text.FORMAT_FIDELITY['rst'], _text.FIDELITY_LAYOUT)
+
+    def test_exact_formats_round_trip_line_breaks(self):
+        """csv/tsv/json/yaml/html export and re-import the same values."""
+        data = self.build_dataset()
+        for fmt in ('csv', 'tsv', 'json', 'yaml', 'html'):
+            with self.subTest(format=fmt):
+                exported = data.export(fmt)
+                imported = tablib.Dataset()
+                imported.load(exported, fmt)
+                self.assertEqual(imported.headers, data.headers)
+                self.assertEqual([tuple(row) for row in imported],
+                                 [tuple(row) for row in data])
+
+    def test_exact_formats_round_trip_crlf_and_cr(self):
+        """CR/CRLF line endings survive the exact formats as they are."""
+        data = tablib.Dataset(headers=['a', 'b'])
+        data.append(['x\r\ny', 'z\rw'])
+        for fmt in ('csv', 'tsv', 'json', 'yaml', 'html'):
+            with self.subTest(format=fmt):
+                imported = tablib.Dataset()
+                imported.load(data.export(fmt), fmt)
+                self.assertEqual([tuple(row) for row in imported],
+                                 [('x\r\ny', 'z\rw')])
+
+    def test_csv_quotes_cell_with_line_break(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        self.assertEqual(data.export('csv'), 'id,text\r\n1,"a\nb"\r\n')
+
+    def test_json_escapes_line_break(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        self.assertEqual(json.loads(data.export('json')),
+                         [{'id': '1', 'text': 'a\nb'}])
+
+    def test_yaml_uses_double_quotes_for_line_breaks(self):
+        """A double-quoted scalar spells the line break as an escape, so
+        re-indenting the document cannot change the value."""
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        exported = data.export('yaml')
+        self.assertIn('"a\\nb"', exported)
+        # Re-indenting the whole document (e.g. embedding it) keeps the value.
+        reindented = '\n'.join(
+            ('    ' + line if line else line) for line in exported.split('\n'))
+        self.assertEqual(tablib.Dataset().load(reindented, 'yaml')[0], ('1', 'a\nb'))
+
+    def test_yaml_book_round_trip_line_breaks(self):
+        data = self.build_dataset()
+        data.title = 'Sheet'
+        book = tablib.Databook([data])
+        exported = book.export('yaml')
+        imported = tablib.Databook()
+        imported.load(exported, 'yaml')
+        self.assertEqual(imported.sheets()[0].title, 'Sheet')
+        self.assertEqual([tuple(row) for row in imported.sheets()[0]],
+                         [tuple(row) for row in data])
+
+    def test_jira_writes_line_break_notation(self):
+        """The Jira exporter keeps one physical line per table row and writes
+        the line break as ``\\\\``, the Jira notation for a line break."""
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        data.append(['2', 'plain'])
+        self.assertEqual(data.export('jira'), '||id||text||\n|1|a\\\\b|\n|2|plain|')
+
+    def test_jira_cell_boundaries_survive_line_breaks(self):
+        """Every exported line holds exactly one table row, so a downstream
+        reader that splits on newlines keeps the columns aligned."""
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        data.append(['2', 'c\r\nd'])
+        lines = data.export('jira').split('\n')
+        self.assertEqual(len(lines), 3)
+        self.assertEqual([line.count('|') for line in lines], [6, 3, 3])
+
+    def test_jira_multiline_cell_keeps_other_columns(self):
+        data = tablib.Dataset(headers=['a', 'b', 'c'])
+        data.append(['1', 'x\ny', '3'])
+        self.assertEqual(data.export('jira'), '||a||b||c||\n|1|x\\\\y|3|')
+
+    def test_latex_stacks_multiline_cell(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        output = data.export('latex')
+        self.assertIn('\\shortstack{a \\\\ b}', output)
+        # The table row still occupies one physical line.
+        body_line = next(line for line in output.split('\n') if 'shortstack' in line)
+        self.assertTrue(body_line.rstrip().endswith('\\\\'))
+
+    def test_latex_escapes_reserved_symbols_within_lines(self):
+        data = tablib.Dataset(['a_b\nc%d'])
+        output = data.export('latex')
+        self.assertIn('\\shortstack{a\\_b \\\\ c\\%d}', output)
+
+    def test_rst_renders_line_break_as_line_break(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        self.assertEqual(
+            data.export('rst'),
+            '+----+------+\n'
+            '| id | text |\n'
+            '+====+======+\n'
+            '| 1  | a    |\n'
+            '|    | b    |\n'
+            '+----+------+',
+        )
+
+    def test_rst_with_line_break_uses_grid_table(self):
+        """A simple RST table cannot hold a multi-line cell, so the export
+        switches to a grid table instead of collapsing the break to a space."""
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        output = data.export('rst')
+        self.assertIn('+', output)
+        self.assertNotIn('a b', output)
+
+    def test_rst_line_break_no_wider_than_longest_line(self):
+        """The column is sized by the longest line, not the whole value."""
+        data = tablib.Dataset(headers=['h'])
+        data.append(['ab\ncd'])
+        lines = data.export('rst').split('\n')
+        # A single-column grid table whose cell holds the 2-character lines.
+        self.assertEqual(lines[0], '+----+')
+        self.assertEqual(lines[3:5], ['| ab |', '| cd |'])
+
+    def test_cli_renders_line_breaks_multiline(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        self.assertEqual(
+            data.export('cli', tablefmt='grid'),
+            '+------+--------+\n'
+            '|   id | text   |\n'
+            '+======+========+\n'
+            '|    1 | a      |\n'
+            '|      | b      |\n'
+            '+------+--------+',
+        )
+
+    def test_cli_normalizes_crlf(self):
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\r\nb'])
+        expected = data.export('cli', tablefmt='grid')
+        data_lf = tablib.Dataset(headers=['id', 'text'])
+        data_lf.append(['1', 'a\nb'])
+        self.assertEqual(expected, data_lf.export('cli', tablefmt='grid'))
+
+    def test_plain_cells_unchanged_in_every_text_format(self):
+        """Cells without line breaks keep the exact output they had before
+        line-break handling was added."""
+        founders = tablib.Dataset(headers=('first_name', 'last_name', 'gpa'))
+        founders.append(('John', 'Adams', 90))
+        founders.append(('George', 'Washington', 67))
+        founders.append(('Thomas', 'Jefferson', 50))
+        self.assertEqual(
+            founders.export('jira'),
+            '||first_name||last_name||gpa||\n'
+            '|John|Adams|90|\n'
+            '|George|Washington|67|\n'
+            '|Thomas|Jefferson|50|',
+        )
+        self.assertEqual(
+            founders.export('rst'),
+            '==========  ==========  ===\n'
+            'first_name  last_name   gpa\n'
+            '==========  ==========  ===\n'
+            'John        Adams       90 \n'
+            'George      Washington  67 \n'
+            'Thomas      Jefferson   50 \n'
+            '==========  ==========  ===',
+        )
+        self.assertEqual(
+            founders.export('latex'),
+            '% Note: add \\usepackage{booktabs} to your preamble\n'
+            '%\n'
+            '\\begin{table}[!htbp]\n'
+            '  \\centering\n'
+            '  %\n'
+            '  \\begin{tabular}{lrr}\n'
+            '    \\toprule\n'
+            '      first\\_name & last\\_name & gpa \\\\\n'
+            '    \\cmidrule(r){1-1} \\cmidrule(lr){2-2} \\cmidrule(l){3-3}\n'
+            '      John & Adams & 90 \\\\\n'
+            '      George & Washington & 67 \\\\\n'
+            '      Thomas & Jefferson & 50 \\\\\n'
+            '    \\bottomrule\n'
+            '  \\end{tabular}\n'
+            '\\end{table}\n',
+        )
+        self.assertEqual(
+            tablib.Dataset(['a', 'b', 'c']).export('cli', tablefmt='grid'),
+            '+---+---+---+\n| a | b | c |\n+---+---+---+',
+        )
+        plain = tablib.Dataset(headers=['k', 'v'])
+        plain.append(['a', 'b'])
+        self.assertEqual(plain.export('yaml'), "- {k: a, v: b}\n")
+
+    def test_header_with_line_break_round_trips_where_supported(self):
+        data = tablib.Dataset(headers=['a\nb', 'c'])
+        data.append(['1', '2'])
+        for fmt in ('csv', 'json', 'yaml', 'html'):
+            with self.subTest(format=fmt):
+                imported = tablib.Dataset()
+                imported.load(data.export(fmt), fmt)
+                self.assertEqual(imported.headers, ['a\nb', 'c'])
+
+    def test_header_with_line_break_keeps_jira_rows_intact(self):
+        data = tablib.Dataset(headers=['a\nb', 'c'])
+        data.append(['1', '2'])
+        output = data.export('jira')
+        self.assertEqual(output, '||a\\\\b||c||\n|1|2|')
+
+    def test_sql_string_literal_keeps_line_break(self):
+        """SQL literals carry a raw line break inside the quoted string."""
+        data = tablib.Dataset(headers=['id', 'text'])
+        data.append(['1', 'a\nb'])
+        self.assertIn("'a\nb'", data.export('sql'))
+
+
 class SQLFormatTests(unittest.TestCase):
     def test_sql_date_and_timestamp_literals(self):
         # ANSI SQL date and timestamp literals

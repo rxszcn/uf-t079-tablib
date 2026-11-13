@@ -3,9 +3,18 @@
    Generates a Jira table from the dataset.
 """
 
+__lazy_modules__ = {"tablib.formats._text"}
+
+from ._text import JIRA_LINE_BREAK, escape_line_breaks
+
 
 class JIRAFormat:
     title = 'jira'
+
+    #: Line breaks inside a cell are written with the Jira wiki markup
+    #: notation for an explicit line break (two backslashes) instead of
+    #: writing the line break itself, which would split the table row.
+    LINE_BREAK = JIRA_LINE_BREAK
 
     @classmethod
     def export_set(cls, dataset):
@@ -14,6 +23,10 @@ class JIRAFormat:
         ||heading 1||heading 2||heading 3||
         |col A1|col A2|col A3|
         |col B1|col B2|col B3|
+
+        A cell containing line breaks is kept on a single physical line; the
+        line breaks are written as ``\\\\``, the Jira notation for an explicit
+        line break.
 
         :param dataset: dataset to serialize
         :type dataset: tablib.core.Dataset
@@ -35,6 +48,9 @@ class JIRAFormat:
     def _serialize_row(cls, row, delimiter='|'):
         return '{}{}{}'.format(
             delimiter,
-            delimiter.join([str(item) if item else ' ' for item in row]),
+            delimiter.join([
+                escape_line_breaks(str(item), cls.LINE_BREAK) if item else ' '
+                for item in row
+            ]),
             delimiter
         )

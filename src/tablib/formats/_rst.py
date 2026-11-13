@@ -1,11 +1,13 @@
 """ Tablib - reStructuredText Support
 """
 
-__lazy_modules__ = {"itertools", "statistics", "textwrap"}
+__lazy_modules__ = {"itertools", "statistics", "textwrap", "tablib.formats._text"}
 
 from itertools import zip_longest
 from statistics import median
 from textwrap import TextWrapper
+
+from ._text import has_line_break, split_lines
 
 JUSTIFY_LEFT = 'left'
 JUSTIFY_CENTER = 'center'
@@ -29,6 +31,20 @@ def _max_word_len(text):
     return max((len(word) for word in text.split()), default=0) if text else 0
 
 
+def _max_line_len(text):
+    """Length of the longest physical line in `text`.
+
+    A cell containing line breaks is laid out on several lines, so its width
+    is driven by its longest line rather than by the length of the whole
+    string. Non-string values are measured as before.
+    """
+    if not isinstance(text, str):
+        return len(text)
+    if not has_line_break(text):
+        return len(text)
+    return max(len(line) for line in split_lines(text))
+
+
 class ReSTFormat:
     title = 'rst'
     extensions = ('rst',)
@@ -40,9 +56,17 @@ class ReSTFormat:
         """
         Returns a list of string lengths of each column, and a list of
         maximum word lengths.
+
+        For a cell containing line breaks the length of its longest line is
+        used, since the cell is rendered on several lines.
         """
         if dataset.headers:
-            column_lengths = [[len(h)] for h in dataset.headers]
+            # Headers are measured exactly as before; only a string header
+            # with line breaks is measured by its longest line.
+            column_lengths = [
+                [_max_line_len(h) if isinstance(h, str) and has_line_break(h) else len(h)]
+                for h in dataset.headers
+            ]
             word_lens = [_max_word_len(h) for h in dataset.headers]
         else:
             column_lengths = [[] for _ in range(dataset.width)]
@@ -51,9 +75,27 @@ class ReSTFormat:
             values = iter(row.values() if hasattr(row, 'values') else row)
             for i, val in enumerate(values):
                 text = to_str(val)
-                column_lengths[i].append(len(text))
+                column_lengths[i].append(_max_line_len(text))
                 word_lens[i] = max(word_lens[i], _max_word_len(text))
         return column_lengths, word_lens
+
+    @classmethod
+    def _wrap_cell(cls, wrapper, text):
+        """Wrap one cell into the lines it occupies.
+
+        A cell without line breaks is wrapped exactly as before. A cell with
+        line breaks keeps them: every physical line is wrapped on its own and
+        the lines are laid out one after another, so the line break is
+        rendered as a line break instead of being collapsed into a space.
+        """
+        if not has_line_break(text):
+            return wrapper.wrap(text)
+        cell = []
+        for line in split_lines(text):
+            # ``wrap`` returns an empty list for a blank line; keep a blank
+            # line so the cell's vertical extent matches its content.
+            cell.extend(wrapper.wrap(line) or [''])
+        return cell
 
     @classmethod
     def _row_to_lines(cls, values, widths, wrapper, sep='|', justify=JUSTIFY_LEFT):
@@ -79,7 +121,7 @@ class ReSTFormat:
         for value, width in zip(values, widths):
             wrapper.width = width
             text = to_str(value)
-            cell = wrapper.wrap(text)
+            cell = cls._wrap_cell(wrapper, text)
             cells.append(cell)
         lines = zip_longest(*cells, fillvalue='')
         lines = (
@@ -213,12 +255,27 @@ class ReSTFormat:
         return True
 
     @classmethod
+    def _has_line_breaks(cls, dataset):
+        """True when any header or cell holds a line break.
+
+        A simple table cannot express a cell spanning several lines, so a
+        dataset with line breaks is always rendered as a grid table.
+        """
+        values = list(dataset.headers or ())
+        for row in dataset.dict:
+            values.extend(row.values() if hasattr(row, 'values') else row)
+        return any(has_line_break(to_str(value)) for value in values)
+
+    @classmethod
     def export_set(cls, dataset, **kwargs):
         """
         Returns reStructuredText table representation of dataset.
 
         Returns a simple table if the text in the first column is never
-        wrapped, otherwise returns a grid table.
+        wrapped, otherwise returns a grid table. A dataset whose cells
+        contain line breaks always uses a grid table, where the line breaks
+        are rendered as line breaks inside the cell instead of being
+        collapsed into spaces.
 
 
         >>> from tablib import Dataset
@@ -253,7 +310,7 @@ class ReSTFormat:
             dataset.get_col(0),
             column_widths[0],
         )
-        if use_simple_table and not force_grid:
+        if use_simple_table and not force_grid and not cls._has_line_breaks(dataset):
             return cls.export_set_as_simple_table(dataset, column_widths)
         else:
             return cls.export_set_as_grid_table(dataset, column_widths)
